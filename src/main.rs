@@ -36,6 +36,11 @@ fn main() {
             primary_window: Some(Window {
                 title: "Earth Orbit — Bevy".to_string(),
                 resolution: (1280, 800).into(),
+                // На Web Bevy использует уже существующий canvas из index.html.
+                // На macOS/Windows/Linux эти параметры игнорируются.
+                canvas: Some("#bevy-canvas".to_string()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: false,
                 ..default()
             }),
             ..default()
@@ -52,8 +57,8 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Земля: ортогональная (equirectangular) текстура 2:1.
-    let earth_texture: Handle<Image> = asset_server.load("earth.jpeg");
+    // Земля: эквидистантная цилиндрическая (equirectangular) текстура 2:1.
+    let earth_texture: Handle<Image> = asset_server.load("earth.png");
     let earth_mesh = meshes.add(Sphere::new(EARTH_RADIUS).mesh().uv(128, 64));
 
     let earth_material = materials.add(StandardMaterial {
@@ -71,7 +76,7 @@ fn setup(
     ));
 
     // Скайбокс: шесть граней извлекаются из cross-развёртки 4x3.
-    let space_texture: Handle<Image> = asset_server.load("space.jpeg");
+    let space_texture: Handle<Image> = asset_server.load("space.png");
     let skybox_mesh = meshes.add(make_cross_skybox_mesh());
     let skybox_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -107,6 +112,7 @@ fn setup(
     ));
 
     // Короткая подсказка поверх сцены.
+    let ui_font = asset_server.load("fonts/DejaVuSans.ttf");
     commands.spawn((
         Text::new(
             "ЛКМ + движение мыши — вращение камеры\n\
@@ -114,6 +120,9 @@ fn setup(
              Home — сброс положения камеры",
         ),
         TextFont {
+            // Встроенный шрифт Bevy содержит только ASCII. Этот TTF включает
+            // кириллицу, в том числе украинские Ґ/Є/І/Ї.
+            font: ui_font.into(),
             font_size: FontSize::Px(16.0),
             ..default()
         },
@@ -162,7 +171,7 @@ fn orbit_camera(
 
 /// Создаёт куб из 6 отдельных четырёхугольников.
 ///
-/// Раскладка исходного space.jpeg (вид со стороны картинки):
+/// Раскладка исходного space.png (вид со стороны картинки):
 ///
 ///       [ ][ ][+Y][ ]
 ///       [-X][+Z][+X][-Z]

@@ -4,4 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.20.1"
+bevy = { version = "=0.20.1", features = ["png", "webgl2", "web"] }
+
+# Оптимизированный профиль для браузерной сборки.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+
+[profile.wasm-release.package."*"]
+opt-level = "s"

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#050812">
+  <meta name="description" content="3D-симуляция Земли на Bevy и WebAssembly">
+  <title>Earth Orbit — Bevy</title>
+  <style>
+    :root { color-scheme: dark; background: #050812; }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; margin: 0; overflow: hidden;
+      background: #050812; font-family: system-ui, sans-serif;
+    }
+    body { display: grid; place-items: center; }
+    #bevy-canvas {
+      display: block; width: 100vw; height: 100vh;
+      outline: none; touch-action: none;
+    }
+    #loading {
+      position: fixed; inset: 0; display: grid; place-items: center;
+      padding: 24px; color: #dbeafe; background: #050812;
+      text-align: center; line-height: 1.6; pointer-events: none;
+    }
+    #loading.error { color: #fecaca; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <canvas id="bevy-canvas" tabindex="0"></canvas>
+  <div id="loading">Загрузка симуляции Земли…</div>
+
+  <script type="module">
+    import init from "./earth_orbit.js";
+
+    const loading = document.getElementById("loading");
+    try {
+      await init();
+      loading.remove();
+      document.getElementById("bevy-canvas").focus();
+    } catch (error) {
+      console.error("Не удалось запустить Earth Orbit:", error);
+      loading.classList.add("error");
+      loading.textContent = "Не удалось запустить симуляцию.\n\n" + String(error)
+        + "\n\nПроверьте, что WASM и папка assets опубликованы вместе с index.html.";
+    }
+  </script>
+</body>
+</html>
