@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#050812">
-  <meta name="description" content="3D-симуляция Земли на Bevy и WebAssembly">
+  <meta name="description" content="Симуляція сонячних панелей на планеті Земля">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Earth Orbit</title>
   <style>
@@ -50,7 +50,7 @@
 </head>
 <body>
   <canvas id="bevy-canvas" tabindex="0"></canvas>
-  <div id="loading">Загрузка симуляции Земли…</div>
+  <div id="loading">Загрузка</div>
 
   <script type="module">
     import init from "./earth_orbit.js";
@@ -64,8 +64,7 @@
     } catch (error) {
       console.error("Не удалось запустить Earth Orbit:", error);
       loading.classList.add("error");
-      loading.textContent = "Не удалось запустить симуляцию.\n\n" + String(error)
-        + "\n\nПроверьте, что WASM и папка assets опубликованы вместе с index.html.";
+      loading.textContent = "Не вдалося запустити симуляцію.\n\n" + String(error);
     }
   </script>
 </body>
