@@ -1,17 +1,35 @@
 use bevy::{
     asset::RenderAssetUsages,
-    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    image::{ImageLoaderSettings, ImageSampler},
+    input::{
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+        touch::Touches,
+    },
     mesh::Indices,
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
 
 const EARTH_RADIUS: f32 = 1.0;
-const SKYBOX_HALF_SIZE: f32 = 250.0;
-const MIN_CAMERA_DISTANCE: f32 = 1.45;
-const MAX_CAMERA_DISTANCE: f32 = 35.0;
-const MOUSE_SENSITIVITY: f32 = 0.005;
-const ZOOM_SENSITIVITY: f32 = 0.14;
+const MIN_CAMERA_DISTANCE: f32 = 1.35;
+const MAX_CAMERA_DISTANCE: f32 = 45.0;
+
+const MOUSE_SENSITIVITY: f32 = 0.0045;
+const TOUCH_SENSITIVITY: f32 = 0.0040;
+const ZOOM_SENSITIVITY: f32 = 0.13;
+const MIN_PITCH: f32 = -1.0;
+const MAX_PITCH: f32 = 1.0;
+
+const SKY_RADIUS: f32 = 120.0;
+const SKY_HALF_HEIGHT: f32 = 100_000.0;
+const SKY_HORIZONTAL_SEGMENTS: u32 = 256;
+const SKY_VERTICAL_SEGMENTS: u32 = 128;
+
+#[derive(Component)]
+struct OrbitCameraTag;
+
+#[derive(Component)]
+struct SkyPanoramaTag;
 
 #[derive(Resource)]
 struct OrbitCamera {
@@ -23,11 +41,17 @@ struct OrbitCamera {
 impl Default for OrbitCamera {
     fn default() -> Self {
         Self {
+            // Camera starts on +Z: latitude 0°, longitude 0°.
             yaw: 0.0,
-            pitch: 0.22,
+            pitch: 0.0,
             distance: 4.0,
         }
     }
+}
+
+#[derive(Resource, Default)]
+struct TouchGestureState {
+    last_tap_at: Option<f64>,
 }
 
 fn main() {
@@ -36,18 +60,21 @@ fn main() {
             primary_window: Some(Window {
                 title: "Earth Orbit — Bevy".to_string(),
                 resolution: (1280, 800).into(),
-                // На Web Bevy использует уже существующий canvas из index.html.
-                // На macOS/Windows/Linux эти параметры игнорируются.
                 canvas: Some("#bevy-canvas".to_string()),
                 fit_canvas_to_parent: true,
+                // CSS touch-action:none in index.html prevents browser page gestures.
                 prevent_default_event_handling: false,
                 ..default()
             }),
             ..default()
         }))
         .init_resource::<OrbitCamera>()
+        .init_resource::<TouchGestureState>()
         .add_systems(Startup, setup)
-        .add_systems(Update, orbit_camera)
+        .add_systems(
+            Update,
+            (orbit_camera, keep_panorama_centered).chain(),
+        )
         .run();
 }
 
@@ -57,9 +84,11 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Земля: эквидистантная цилиндрическая (equirectangular) текстура 2:1.
+    // Equirectangular Earth mesh with an explicit coordinate convention:
+    // +Y = north pole, +Z = 0° latitude / 0° longitude, +X = 90° east.
+    // This avoids relying on the default orientation of a built-in UV sphere.
     let earth_texture: Handle<Image> = asset_server.load("earth.png");
-    let earth_mesh = meshes.add(Sphere::new(EARTH_RADIUS).mesh().uv(128, 64));
+    let earth_mesh = meshes.add(make_earth_mesh(384, 192));
 
     let earth_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -73,66 +102,55 @@ fn setup(
         Name::new("Earth"),
         Mesh3d(earth_mesh),
         MeshMaterial3d(earth_material),
+        Transform::IDENTITY,
     ));
 
-    // Скайбокс: шесть граней извлекаются из cross-развёртки 4x3.
-    let space_texture: Handle<Image> = asset_server.load("space.png");
-    let skybox_mesh = meshes.add(make_cross_skybox_mesh());
-    let skybox_material = materials.add(StandardMaterial {
+    // The source atlas is a 4x3 cross. Only its complete middle row is used:
+    // the two vertical tiles above/below it are intentionally excluded.
+    // The installer places a seam-matched, sharpened panorama in assets/.
+    let sky_texture: Handle<Image> = asset_server
+        .load_builder()
+        .with_settings(|settings: &mut ImageLoaderSettings| {
+            settings.sampler = ImageSampler::linear();
+        })
+        .load("space_panorama.png");
+
+    let sky_mesh = meshes.add(make_sky_sphere_mesh());
+    let sky_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        base_color_texture: Some(space_texture),
+        base_color_texture: Some(sky_texture),
         unlit: true,
         cull_mode: None,
         ..default()
     });
 
     commands.spawn((
-        Name::new("Space skybox"),
-        Mesh3d(skybox_mesh),
-        MeshMaterial3d(skybox_material),
+        Name::new("Camera-centered space panorama"),
+        SkyPanoramaTag,
+        Mesh3d(sky_mesh),
+        MeshMaterial3d(sky_material),
+        Transform::IDENTITY,
     ));
 
-    // Направленное освещение подчёркивает объём шара.
     commands.spawn((
-        DirectionalLight::default(),
-        Transform::from_xyz(4.0, 3.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DirectionalLight {
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(-4.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Камера всегда смотрит в центр Земли.
     let orbit = OrbitCamera::default();
-    let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
+    let camera_position = orbit_position(&orbit);
     commands.spawn((
         Name::new("Orbit camera"),
+        OrbitCameraTag,
         Camera3d::default(),
-        Transform {
-            rotation,
-            translation: rotation * Vec3::new(0.0, 0.0, orbit.distance),
+        Projection::Perspective(PerspectiveProjection {
+            far: 2_500.0,
             ..default()
-        },
-    ));
-
-    // Короткая подсказка поверх сцены.
-    let ui_font = asset_server.load("fonts/DejaVuSans.ttf");
-    commands.spawn((
-        Text::new(
-            "ЛКМ + движение мыши — вращение камеры\n\
-             Колесо мыши — приближение / отдаление\n\
-             Home — сброс положения камеры",
-        ),
-        TextFont {
-            // Встроенный шрифт Bevy содержит только ASCII. Этот TTF включает
-            // кириллицу, в том числе украинские Ґ/Є/І/Ї.
-            font: ui_font.into(),
-            font_size: FontSize::Px(16.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.88, 0.92, 1.0)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(16),
-            left: px(16),
-            ..default()
-        },
+        }),
+        Transform::from_translation(camera_position).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
 
@@ -141,63 +159,153 @@ fn orbit_camera(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    time: Res<Time>,
+    mut touch_state: ResMut<TouchGestureState>,
     mut orbit: ResMut<OrbitCamera>,
-    mut camera: Single<&mut Transform, With<Camera>>,
+    mut camera: Single<&mut Transform, (With<OrbitCameraTag>, Without<SkyPanoramaTag>)>,
 ) {
-    // Вращаем камеру только при зажатой левой кнопке мыши.
+    // Desktop: hold the left mouse button and drag.
     if mouse_buttons.pressed(MouseButton::Left) {
         orbit.yaw -= mouse_motion.delta.x * MOUSE_SENSITIVITY;
-        orbit.pitch = (orbit.pitch + mouse_motion.delta.y * MOUSE_SENSITIVITY)
-            .clamp(-1.52, 1.52);
+
+        // Inverted vertical axis: dragging down tilts the virtual camera upward.
+        orbit.pitch += mouse_motion.delta.y * MOUSE_SENSITIVITY;
     }
 
-    // Учитываем различие между прокруткой колёсика и прокруткой тачпада.
+    // Desktop / trackpad zoom. Positive wheel delta zooms in.
     let scroll_y = match mouse_scroll.unit {
         MouseScrollUnit::Line => mouse_scroll.delta.y,
         MouseScrollUnit::Pixel => mouse_scroll.delta.y / 100.0,
     };
+    if scroll_y.abs() > 0.0 {
+        orbit.distance *= (-scroll_y * ZOOM_SENSITIVITY).exp();
+    }
 
-    orbit.distance = (orbit.distance * (-scroll_y * ZOOM_SENSITIVITY).exp())
-        .clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
+    // Mobile:
+    // - one finger drag: orbit
+    // - two finger pinch: zoom
+    // - double tap: reset camera
+    let mut active_touches: Vec<_> = touches.iter().collect();
+    active_touches.sort_by_key(|touch| touch.id());
+
+    match active_touches.as_slice() {
+        [finger] => {
+            let delta = finger.delta();
+            orbit.yaw -= delta.x * TOUCH_SENSITIVITY;
+            orbit.pitch -= delta.y * TOUCH_SENSITIVITY;
+        }
+        [first, second, ..] => {
+            let previous_distance = first
+                .previous_position()
+                .distance(second.previous_position());
+            let current_distance = first.position().distance(second.position());
+
+            if previous_distance > 1.0 && current_distance > 1.0 {
+                orbit.distance *= previous_distance / current_distance;
+            }
+        }
+        _ => {}
+    }
+
+    // A deliberate double tap is a convenient mobile equivalent of Home.
+    for touch in touches.iter_just_released() {
+        if touch.distance().length() <= 18.0 {
+            let now = time.elapsed_secs_f64();
+            match touch_state.last_tap_at {
+                Some(previous_tap) if now - previous_tap <= 0.38 => {
+                    *orbit = OrbitCamera::default();
+                    touch_state.last_tap_at = None;
+                }
+                _ => touch_state.last_tap_at = Some(now),
+            }
+        }
+    }
 
     if keyboard.just_pressed(KeyCode::Home) {
         *orbit = OrbitCamera::default();
     }
 
-    let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
-    camera.rotation = rotation;
-    camera.translation = rotation * Vec3::new(0.0, 0.0, orbit.distance);
+    orbit.pitch = orbit.pitch.clamp(MIN_PITCH, MAX_PITCH);
+    orbit.distance = orbit
+        .distance
+        .clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
+
+    let position = orbit_position(&orbit);
+    **camera = Transform::from_translation(position).looking_at(Vec3::ZERO, Vec3::Y);
 }
 
-/// Создаёт куб из 6 отдельных четырёхугольников.
-///
-/// Раскладка исходного space.png (вид со стороны картинки):
-///
-///       [ ][ ][+Y][ ]
-///       [-X][+Z][+X][-Z]
-///       [ ][ ][-Y][ ]
-///
-/// Размер изображения 1020x768, то есть сетка из тайлов 255x256 px.
-fn make_cross_skybox_mesh() -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(24);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(24);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(24);
-    let mut indices: Vec<u32> = Vec::with_capacity(36);
+fn orbit_position(orbit: &OrbitCamera) -> Vec3 {
+    let cos_pitch = orbit.pitch.cos();
+    Vec3::new(
+        orbit.distance * cos_pitch * orbit.yaw.sin(),
+        orbit.distance * orbit.pitch.sin(),
+        orbit.distance * cos_pitch * orbit.yaw.cos(),
+    )
+}
 
-    // Направления right/up задают ориентацию каждой грани при взгляде изнутри куба.
-    // Координаты тайлов указаны в столбцах и строках с нуля, сверху вниз.
-    push_sky_face(&mut positions, &mut normals, &mut uvs, &mut indices,
-        Vec3::X, Vec3::Z, Vec3::Y, 2, 1);
-    push_sky_face(&mut positions, &mut normals, &mut uvs, &mut indices,
-        Vec3::NEG_X, Vec3::NEG_Z, Vec3::Y, 0, 1);
-    push_sky_face(&mut positions, &mut normals, &mut uvs, &mut indices,
-        Vec3::Y, Vec3::NEG_X, Vec3::NEG_Z, 2, 0);
-    push_sky_face(&mut positions, &mut normals, &mut uvs, &mut indices,
-        Vec3::NEG_Y, Vec3::NEG_X, Vec3::Z, 2, 2);
-    push_sky_face(&mut positions, &mut normals, &mut uvs, &mut indices,
-        Vec3::Z, Vec3::NEG_X, Vec3::Y, 1, 1);
-    push_sky_face(&mut positions, &mut normals, &mut uvs, &mut indices,
-        Vec3::NEG_Z, Vec3::X, Vec3::Y, 3, 1);
+/// Follow camera translation only. The panorama keeps its world orientation,
+/// so panning the camera changes the viewed direction but camera translation
+/// cannot create parallax or make the background appear to move closer/farther.
+fn keep_panorama_centered(
+    camera: Single<&Transform, (With<OrbitCameraTag>, Without<SkyPanoramaTag>)>,
+    mut panorama: Single<&mut Transform, (With<SkyPanoramaTag>, Without<OrbitCameraTag>)>,
+) {
+    panorama.translation = camera.translation;
+}
+
+/// A single continuous, uncapped cylinder (no top or bottom faces).
+/// The full 4:1 panorama is wrapped around its circumference.
+
+
+fn make_sky_sphere_mesh() -> Mesh {
+    let sectors = 256;
+    let stacks = 128;
+
+    let mut positions = Vec::<[f32; 3]>::new();
+    let mut normals = Vec::<[f32; 3]>::new();
+    let mut uvs = Vec::<[f32; 2]>::new();
+    let mut indices = Vec::<u32>::new();
+
+    let stride = sectors + 1;
+
+    for stack in 0..=stacks {
+        let v = stack as f32 / stacks as f32;
+        let latitude = std::f32::consts::FRAC_PI_2
+            - v * std::f32::consts::PI;
+
+        let cos_lat = latitude.cos();
+        let sin_lat = latitude.sin();
+
+        for sector in 0..=sectors {
+            let u = sector as f32 / sectors as f32;
+            let longitude = (u - 0.5) * std::f32::consts::TAU;
+
+            let normal = Vec3::new(
+                cos_lat * longitude.sin(),
+                sin_lat,
+                cos_lat * longitude.cos(),
+            ).normalize();
+
+            positions.push((normal * SKY_RADIUS).to_array());
+            normals.push((-normal).to_array());
+            uvs.push([u, v]);
+        }
+    }
+
+    for stack in 0..stacks {
+        for sector in 0..sectors {
+            let a = stack * stride + sector;
+            let b = a + 1;
+            let c = a + stride;
+            let d = c + 1;
+
+            indices.extend_from_slice(&[
+                a, b, c,
+                b, d, c,
+            ]);
+        }
+    }
 
     Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -209,55 +317,62 @@ fn make_cross_skybox_mesh() -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
-fn push_sky_face(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    indices: &mut Vec<u32>,
-    normal: Vec3,
-    right: Vec3,
-    up: Vec3,
-    tile_column: u32,
-    tile_row: u32,
-) {
-    let center = normal * SKYBOX_HALF_SIZE;
-    let half = SKYBOX_HALF_SIZE;
+/// Custom equirectangular sphere:
+/// - U=0.5 is the zero meridian, facing +Z.
+/// - V=0 is the north pole, V=0.5 the equator, V=1 the south pole.
+fn make_earth_mesh(sectors: u32, stacks: u32) -> Mesh {
+    let mut positions = Vec::<[f32; 3]>::new();
+    let mut normals = Vec::<[f32; 3]>::new();
+    let mut uvs = Vec::<[f32; 2]>::new();
+    let mut indices = Vec::<u32>::new();
 
-    // Порядок вершин: верхний левый, верхний правый,
-    // нижний правый, нижний левый.
-    let corners = [
-        center - right * half + up * half,
-        center + right * half + up * half,
-        center + right * half - up * half,
-        center - right * half - up * half,
-    ];
+    let stride = sectors + 1;
+    let vertex_count = (stacks + 1) * stride;
+    positions.reserve(vertex_count as usize);
+    normals.reserve(vertex_count as usize);
+    uvs.reserve(vertex_count as usize);
 
-    let base = positions.len() as u32;
-    for corner in corners {
-        positions.push(corner.to_array());
-        normals.push(normal.to_array());
+    for stack in 0..=stacks {
+        let v = stack as f32 / stacks as f32;
+        let latitude = std::f32::consts::FRAC_PI_2 - v * std::f32::consts::PI;
+        let cos_lat = latitude.cos();
+        let sin_lat = latitude.sin();
+
+        for sector in 0..=sectors {
+            let u = sector as f32 / sectors as f32;
+            let longitude = (u - 0.5) * std::f32::consts::TAU;
+
+            let normal = Vec3::new(
+                cos_lat * longitude.sin(),
+                sin_lat,
+                cos_lat * longitude.cos(),
+            )
+            .normalize();
+
+            positions.push((normal * EARTH_RADIUS).to_array());
+            normals.push(normal.to_array());
+            uvs.push([u, v]);
+        }
     }
 
-    // Учитываем половину пикселя по краям тайла, чтобы линейная фильтрация
-    // не захватывала соседние грани atlas-текстуры.
-    const IMAGE_WIDTH: f32 = 1020.0;
-    const IMAGE_HEIGHT: f32 = 768.0;
-    const TILE_WIDTH: f32 = IMAGE_WIDTH / 4.0;
-    const TILE_HEIGHT: f32 = IMAGE_HEIGHT / 3.0;
-    let u0 = (tile_column as f32 * TILE_WIDTH + 0.5) / IMAGE_WIDTH;
-    let u1 = ((tile_column as f32 + 1.0) * TILE_WIDTH - 0.5) / IMAGE_WIDTH;
-    let v0 = (tile_row as f32 * TILE_HEIGHT + 0.5) / IMAGE_HEIGHT;
-    let v1 = ((tile_row as f32 + 1.0) * TILE_HEIGHT - 0.5) / IMAGE_HEIGHT;
+    for stack in 0..stacks {
+        for sector in 0..sectors {
+            let a = stack * stride + sector;
+            let b = a + 1;
+            let c = a + stride;
+            let d = c + 1;
 
-    uvs.extend_from_slice(&[
-        [u0, v0],
-        [u1, v0],
-        [u1, v1],
-        [u0, v1],
-    ]);
+            // Counter-clockwise from outside: normals point away from center.
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
 
-    indices.extend_from_slice(&[
-        base, base + 1, base + 2,
-        base, base + 2, base + 3,
-    ]);
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
 }
